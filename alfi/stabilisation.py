@@ -53,7 +53,7 @@ class SUPG(Stabilisation):
         self.magic = magic
         self.h = h or CellSize(self.mesh)
         if self.weight is None:
-            tdim = self.mesh.topological_dimension()
+            tdim = self.mesh.topological_dimension
             self.weight = Constant(0.1) if tdim == 3 else Constant(1)
 
     def coefficient(self):
@@ -145,7 +145,7 @@ class BurmanStabilisation(Stabilisation):
             # stream line diffusion type
             # self.weight = Constant(4e-3) # 
         if h is None:
-            if self.mesh.topological_dimension() == 3:
+            if self.mesh.topological_dimension == 3:
                 self.h = FacetArea(self.mesh)**0.5  # go from area to length
             else:
                 self.h = FacetArea(self.mesh)

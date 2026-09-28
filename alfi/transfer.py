@@ -2,6 +2,8 @@ from firedrake import *
 from firedrake.dmhooks import get_appctx
 from firedrake.petsc import *
 import weakref
+from functools import cached_property
+import ufl
 from numpy import unique
 import numpy
 from pyop2.datatypes import IntType
@@ -65,7 +67,7 @@ class CoarseCellMacroPatches(object):
 
         patches = []
 
-        tdim = mf.topological_dimension()
+        tdim = mf.topological_dimension
         for i, fine_firedrake in enumerate(coarse_to_fine_cell_map):
             # there are d+1 many coarse cells that all map to the same fine cells.
             # We only want to build the patch once, so skip repitions
@@ -148,11 +150,11 @@ class AutoSchoeberlTransfer(object):
                 self.nodelist = nodelist
                 DirichletBC.__init__(self, V, g, "on_boundary")
 
-            @utils.cached_property
+            @cached_property
             def nodes(self):
                 return self.nodelist
 
-        dim = V.mesh().topological_dimension()
+        dim = V.mesh().topological_dimension
         bc = FixedDirichletBC(V, ufl.zero(V.ufl_element().value_shape()), nodelist)
 
         return bc
@@ -198,22 +200,25 @@ class AutoSchoeberlTransfer(object):
         else:
             fine = source
             coarse = target
-        # Rebuild without any indices
-        V = FunctionSpace(fine.ufl_domain(), fine.function_space().ufl_element())
-        key = V.dim()
+        key = fine.function_space().dim()
 
         firsttime = self.bcs.get(key, None) is None
 
         if firsttime:
             from firedrake.solving_utils import _SNESContext
+            # Rebuild without any indices.  Keep this exact space alive with
+            # the cached forms and tensors: recent Firedrake requires form
+            # arguments and result tensors to reference the same space object.
+            V = FunctionSpace(fine.ufl_domain(), fine.function_space().ufl_element())
             bcs = self.fix_coarse_boundaries(V)
             a = self.form(V)
             A = assemble(a, bcs=bcs, mat_type=self.patchparams["mat_type"])
 
             tildeu, rhs = Function(V), Function(V)
+            dual_rhs = Function(V.dual())
 
             bform = self.bform(rhs)
-            b = Function(V)
+            b = Function(V.dual())
             problem = LinearVariationalProblem(a=a, L=0, u=tildeu, bcs=bcs)
             ctx = _SNESContext(problem, mat_type=self.patchparams["mat_type"],
                                pmat_type=self.patchparams["mat_type"],
@@ -224,14 +229,15 @@ class AutoSchoeberlTransfer(object):
             solver._ctx = ctx
             self.bcs[key] = bcs
             self.solver[key] = solver
-            self.rhs[key] = tildeu, rhs
+            self.rhs[key] = tildeu, rhs, dual_rhs
             self.tensors[key] = A, b, bform
             self.prev_parameters[key] = [float(param) for param in self.parameters]
         else:
             bcs = self.bcs[key]
             solver = self.solver[key]
             A, b, bform = self.tensors[key]
-            tildeu, rhs = self.rhs[key]
+            tildeu, rhs, dual_rhs = self.rhs[key]
+            V = tildeu.function_space()
 
             # Update operator if parameters have changed.
 
@@ -270,9 +276,9 @@ class AutoSchoeberlTransfer(object):
                         solver.ksp.pc.apply(rhsv, x)
             # solver.solve(rhs, fine)
             b = assemble(bform, tensor=b)
-            # rhs.assign(fine-b)
-            rhs.dat.data[:] = fine.dat.data_ro - b.dat.data_ro
-            self.standard_transfer(rhs, coarse, "restrict")
+            # dual_rhs.assign(fine-b)
+            dual_rhs.dat.data[:] = fine.dat.data_ro - b.dat.data_ro
+            self.standard_transfer(dual_rhs, coarse, "restrict")
 
 
         # def energy_norm(u):

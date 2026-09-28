@@ -1,5 +1,6 @@
 from firedrake import *
 from firedrake.assemble import OneFormAssembler
+from functools import partial
 
 """ For the P1 + FacetBubble space in 3D, the standard prolongation does not
 preserve the flux across coarse grid facets.  We fix this with a manual
@@ -21,7 +22,11 @@ class BubbleTransfer(object):
         self.fbc = Function(FBc)
         self.p1f = Function(P1f)
         self.fbf = Function(FBf)
-        self.rhs = Function(FBc)
+        self.p1c_dual = Function(P1c.dual())
+        self.fbc_dual = Function(FBc.dual())
+        self.p1f_dual = Function(P1f.dual())
+        self.fbf_dual = Function(FBf.dual())
+        self.rhs = Function(FBc.dual())
 
         trial = TrialFunction(FBc)
         test = TestFunction(FBc)
@@ -36,7 +41,7 @@ class BubbleTransfer(object):
         L = inner(inner(self.fbc, n)/0.625, inner(test, n)) + inner(self.fbc - inner(self.fbc, n)*n, test-inner(test, n)*n)
         L = L*ds + avg(L) * dS
         # This is the guts of assemble(L, tensor=self.rhs), but saves a little time
-        self.assemble_rhs = OneFormAssembler(L, tensor=self.rhs).assemble
+        self.assemble_rhs = partial(OneFormAssembler(L).assemble, tensor=self.rhs)
 
         # TODO: Parameterise these by the element definition.
         # These are correct for P1 + FB in 3D.
@@ -203,19 +208,24 @@ void count(double both[24], double fb[12], double p1[12]) {
 
     def restrict(self, fine, coarse):
         # All the adjoint steps of prolong, but in reverse
-        with self.p1f.dat.vec_wo as v:
+        with self.p1f_dual.dat.vec_wo as v:
             v.zeroEntries()
-        with self.fbf.dat.vec_wo as v:
+        with self.fbf_dual.dat.vec_wo as v:
             v.zeroEntries()
         fine.dat.data[:, :] /= self.countvf.dat.data[:, :]
         op2.par_loop(self.combine_kernel_adj, fine.ufl_domain().cell_set,
                      fine.dat(op2.READ, fine.cell_node_map()),
-                     self.p1f.dat(op2.INC, self.p1f.cell_node_map()),
-                     self.fbf.dat(op2.INC, self.fbf.cell_node_map())
+                     self.p1f_dual.dat(op2.INC, self.p1f_dual.cell_node_map()),
+                     self.fbf_dual.dat(op2.INC, self.fbf_dual.cell_node_map())
                      )
 
-        restrict(self.p1f, self.p1c)
-        restrict(self.fbf, self.fbc)
+        restrict(self.p1f_dual, self.p1c_dual)
+        restrict(self.fbf_dual, self.fbc_dual)
+
+        with self.p1c_dual.dat.vec_ro as src, self.p1c.dat.vec_wo as dest:
+            src.copy(dest)
+        with self.fbc_dual.dat.vec_ro as src, self.fbc.dat.vec_wo as dest:
+            src.copy(dest)
 
         self.assemble_rhs()
         with self.fbc.dat.vec_wo as fbc, self.rhs.dat.vec_ro as b:

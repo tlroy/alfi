@@ -76,9 +76,8 @@ class OrderedRelaxation(object):
 
     @staticmethod
     def get_entities(opts, name, dm):
-        sentinel = object()
-        codim = opts.getInt("pc_patch_construction_%s_codim" % name, default=sentinel)
-        if codim == sentinel:
+        codim = opts.getInt("pc_patch_construction_%s_codim" % name, default=-1)
+        if codim < 0:
             dim = opts.getInt("pc_patch_construction_%s_dim" % name, default=0)
             entities = range(*dm.getDepthStratum(dim))
         else:

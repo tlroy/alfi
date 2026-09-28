@@ -113,9 +113,9 @@ class NavierStokesSolver(object):
         if hierarchy_callback is not None:
             mh = hierarchy_callback(mh)
         self.parallel = mh[0].comm.size > 1
-        self.tdim = mh[0].topological_dimension()
+        self.tdim = mh[0].topological_dimension
         self.mh = mh
-        self.area = assemble(Constant(1, domain=mh[0])*dx)
+        self.area = assemble(Constant(1)*dx(domain=mh[0]))
         nu = Constant(1.0)
         self.nu = nu
         self.char_L = problem.char_length()
@@ -139,7 +139,7 @@ class NavierStokesSolver(object):
         self.Z = Z
         comm = mesh.mpi_comm()
         if False:#comm.size == 1:
-            visbase = firedrake.Mesh(mesh._topology_dm.clone(), dim=mesh.ufl_cell().geometric_dimension(),
+            visbase = firedrake.Mesh(mesh._topology_dm.clone(), dim=mesh.geometric_dimension,
                                      distribution_parameters=problem.distribution_parameters,
                                      reorder=True)
             vismh = MeshHierarchy(visbase, nref_vis)
@@ -171,8 +171,8 @@ class NavierStokesSolver(object):
         if comm.rank == 0:
             print("Number of velocity degrees of freedom: %s (avg %.2f per core)" % (Vdim, Vdim / size))
         z = Function(Z, name="Solution")
-        z.split()[0].rename("Velocity")
-        z.split()[1].rename("Pressure")
+        z.subfunctions[0].rename("Velocity")
+        z.subfunctions[1].rename("Pressure")
         self.z = z
         (u, p) = split(z)
         (v, q) = split(TestFunction(Z))
@@ -202,7 +202,7 @@ class NavierStokesSolver(object):
         F = self.residual()
 
         """ Stabilisation """
-        wind = split(self.z_last)[0]
+        wind = self.z_last.subfunctions[0]
         rhs = problem.rhs(Z)
         if self.stabilisation_type in ["gls", "supg"]:
             if supg_method == "turek":
@@ -224,7 +224,9 @@ class NavierStokesSolver(object):
             else:
                 raise NotImplementedError
         elif self.stabilisation_type == "burman":
-            self.stabilisation = BurmanStabilisation(self.Z.sub(0), state=u, h=problem.mesh_size(u, "facet"), weight=stabilisation_weight)
+            # Keep the facet-averaged wind lagged.  Differentiating through
+            # facet_avg is not supported by current TSFC.
+            self.stabilisation = BurmanStabilisation(self.Z.sub(0), state=wind, h=problem.mesh_size(u, "facet"), weight=stabilisation_weight)
             self.stabilisation_form = self.stabilisation.form(u, v)
         else:
             self.stabilisation = None
@@ -268,14 +270,14 @@ class NavierStokesSolver(object):
         # self.gamma.assign(1+re)
 
         if self.stabilisation is not None:
-            self.stabilisation.update(self.z.split()[0])
+            self.stabilisation.update(self.z.subfunctions[0])
         start = datetime.now()
         self.solver.solve()
         end = datetime.now()
 
         if self.nsp is not None:
             # Hardcode that pressure integral is zero
-            (u, p) = self.z.split()
+            (u, p) = self.z.subfunctions
             pintegral = assemble(p*dx)
             p.assign(p - Constant(pintegral/self.area))
 
@@ -464,7 +466,7 @@ class NavierStokesSolver(object):
             "snes_type": "newtonls",
             "snes_max_it": 20,
             "snes_linesearch_type": "basic",
-            "snes_linesearch_maxstep": 1.0,
+            "snes_linesearch_maxlambda": 1.0,
             "snes_monitor": None,
             "snes_linesearch_monitor": None,
             "snes_converged_reason": None,
@@ -572,7 +574,7 @@ class ConstantPressureSolver(NavierStokesSolver):
         return F
 
     def function_space(self, mesh, k):
-        tdim = mesh.topological_dimension()
+        tdim = mesh.topological_dimension
         if k < tdim:
             Pk = FiniteElement("Lagrange", mesh.ufl_cell(), k)
             FB = FiniteElement("FacetBubble", mesh.ufl_cell(), tdim)
@@ -635,7 +637,9 @@ class ScottVogeliusSolver(NavierStokesSolver):
         if self.stabilisation_type in ["burman", None]:
             qtransfer = NullTransfer()
         elif self.stabilisation_type in ["gls", "supg"]:
-            qtransfer = EmbeddedDGTransfer(V.ufl_element())
+            # Recent Firedrake's TransferManager automatically embeds spaces
+            # without native transfers in a discontinuous space.
+            qtransfer = None
         else:
             raise ValueError("Unknown stabilisation")
         self.qtransfer = qtransfer
@@ -644,12 +648,11 @@ class ScottVogeliusSolver(NavierStokesSolver):
             self.vtransfer = vtransfer
             transfers = {
                 V.ufl_element(): (vtransfer.prolong, vtransfer.restrict if self.restriction else restrict, inject),
-                Q.ufl_element(): (prolong, restrict, qtransfer.inject)
             }
         else:
-            transfers = {
-                Q.ufl_element(): (prolong, restrict, qtransfer.inject)
-            }
+            transfers = {}
+        if qtransfer is not None:
+            transfers[Q.ufl_element()] = (prolong, restrict, qtransfer.inject)
         return transfers
 
     def configure_patch_solver(self, opts):

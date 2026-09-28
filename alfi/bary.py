@@ -4,6 +4,7 @@ from pyop2.datatypes import IntType
 from mpi4py import MPI
 from fractions import Fraction
 from firedrake.cython import mgimpl as impl
+from firedrake.cython import dmcommon
 from firedrake.cython.dmcommon import FACE_SETS_LABEL
 from firedrake.petsc import *
 import numpy
@@ -28,12 +29,16 @@ def bary(cdm):
 
 def BaryMeshHierarchy(mesh, refinement_levels, distribution_parameters=None, callbacks=None, reorder=None,
                       refinements_per_level=1):
-    cdm = mesh._topology_dm
+    # Undo the overlap added while constructing the input mesh.  Refining an
+    # overlapped DMPlex is unsupported, and current Firedrake constructs mesh
+    # topology eagerly (so the old lazy-initialisation guard no longer works).
+    tdim = mesh.topology_dm.getDimension()
+    cdm = dmcommon.submesh_create(mesh.topology_dm, tdim, "depth", tdim, True)
+    cdm.removeLabel("pyop2_core")
+    cdm.removeLabel("pyop2_owned")
+    cdm.removeLabel("pyop2_ghost")
     cdm.setRefinementUniform(True)
-    dms = []
-    if mesh.comm.size > 1 and mesh._grown_halos:
-        raise RuntimeError("Cannot refine parallel overlapped meshes "
-                           "(make sure the MeshHierarchy is built immediately after the Mesh)")
+    dms = [cdm]
     parameters = {}
     if distribution_parameters is not None:
         parameters.update(distribution_parameters)
@@ -79,35 +84,38 @@ def BaryMeshHierarchy(mesh, refinement_levels, distribution_parameters=None, cal
             # of the boundary we're trying to conform to.  This
             # doesn't DTRT really for cubed sphere meshes (the
             # refined meshes are no longer gnonomic).
-            coords = cdm.getCoordinatesLocal().array.reshape(-1, mesh.geometric_dimension())
-            scale = mesh._radius / np.linalg.norm(coords, axis=1).reshape(-1, 1)
+            coords = cdm.getCoordinatesLocal().array.reshape(-1, mesh.geometric_dimension)
+            scale = mesh._radius / numpy.linalg.norm(coords, axis=1).reshape(-1, 1)
             coords *= scale
 
-    barydms = (bary(mesh._topology_dm), ) + tuple(bary(dm) for dm in dms)
+    barydms = tuple(bary(dm) for dm in dms)
 
     for bdm in barydms:
         impl.filter_labels(bdm, bdm.getHeightStratum(1),
                            "exterior_facets", "boundary_faces",
                            FACE_SETS_LABEL)
 
-    barymeshes = [firedrake.Mesh(dm, dim=mesh.ufl_cell().geometric_dimension(),
+    uniform_lgmaps_without_overlap = [
+        impl.create_lgmap(dm) for dm in dms
+    ]
+    bary_lgmaps_without_overlap = [impl.create_lgmap(dm) for dm in barydms]
+
+    barymeshes = [firedrake.Mesh(dm, dim=mesh.geometric_dimension,
                                  distribution_parameters=distribution_parameters,
                                  comm=mesh.comm,
                                  reorder=reorder)
                            for dm in barydms]
 
-    meshes = [mesh] + [firedrake.Mesh(dm, dim=mesh.ufl_cell().geometric_dimension(),
+    meshes = [mesh] + [firedrake.Mesh(dm, dim=mesh.geometric_dimension,
                                       distribution_parameters=distribution_parameters,
                                       comm=mesh.comm,
                                       reorder=reorder)
-                       for dm in dms]
+                       for dm in dms[1:]]
 
     lgmaps = []
-    for i, m in enumerate(meshes):
-        no = impl.create_lgmap(m._topology_dm)
-        m.init()
-        o = impl.create_lgmap(m._topology_dm)
-        m._topology_dm.setRefineLevel(i)
+    for i, (m, no) in enumerate(zip(meshes, uniform_lgmaps_without_overlap)):
+        o = impl.create_lgmap(m.topology_dm)
+        m.topology_dm.setRefineLevel(i)
         lgmaps.append((no, o))
 
     coarse_to_fine_cells = []
@@ -119,14 +127,12 @@ def BaryMeshHierarchy(mesh, refinement_levels, distribution_parameters=None, cal
         fine_to_coarse_cells.append(f2c)
 
     lgmaps = []
-    for i, m in enumerate(barymeshes):
-        no = impl.create_lgmap(m._topology_dm)
-        m.init()
-        o = impl.create_lgmap(m._topology_dm)
-        m._topology_dm.setRefineLevel(i)
+    for i, (m, no) in enumerate(zip(barymeshes, bary_lgmaps_without_overlap)):
+        o = impl.create_lgmap(m.topology_dm)
+        m.topology_dm.setRefineLevel(i)
         lgmaps.append((no, o))
 
-    d = mesh.topological_dimension()
+    d = mesh.topological_dimension
     bary_coarse_to_fine_cells = []
     bary_fine_to_coarse_cells = [None]
     for (coarseu, fineu), (coarse, fine), (clgmaps, flgmaps), uniform_coarse_to_fine \

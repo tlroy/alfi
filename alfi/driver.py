@@ -109,17 +109,22 @@ def run_solver(solver, res, args):
         os.makedirs(chkptdir, exist_ok=True)
     results = {}
     for re in res:
-        try:
-            with DumbCheckpoint(chkptdir + "nssolution-Re-%s" % (re), mode=FILE_READ) as checkpoint:
-                checkpoint.load(solver.z, name="up_%i" % re)
-        except:
+        loaded = False
+        if args.checkpoint:
+            try:
+                with DumbCheckpoint(chkptdir + "nssolution-Re-%s" % (re), mode=FILE_READ) as checkpoint:
+                    checkpoint.load(solver.z, name="up_%i" % re)
+                loaded = True
+            except Exception:
+                pass
+        if not loaded:
             (z, info_dict) = solver.solve(re)
             results[re] = info_dict
             if args.checkpoint:
                 with DumbCheckpoint(chkptdir + "nssolution-Re-%s" % (re), mode=FILE_UPDATE) as checkpoint:
                     checkpoint.store(solver.z, name="up_%i" % re)
         if args.paraview:
-            pvdf.write(solver.visprolong(solver.z.split()[0]), time=re)
+            pvdf.write(solver.visprolong(solver.z.subfunctions[0]), time=re)
 
     if comm.rank == 0:
         for re in results:
