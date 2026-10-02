@@ -8,6 +8,7 @@ from firedrake.cython import dmcommon
 from firedrake.cython.dmcommon import FACE_SETS_LABEL
 from firedrake.petsc import *
 import numpy
+import pyop2
 
 __all__ = ["BaryMeshHierarchy"]
 
@@ -56,6 +57,10 @@ def BaryMeshHierarchy(mesh, refinement_levels, distribution_parameters=None, cal
     for i in range(refinement_levels*refinements_per_level):
         if i % refinements_per_level == 0:
             before(cdm, i)
+        # Firedrake 2026 derives multigrid cell maps from the point map saved
+        # by the DMPlex transform.  Keep it before every refinement so that
+        # the map survives the later construction of overlapped meshes.
+        cdm.setSaveTransform()
         rdm = cdm.refine()
         if i % refinements_per_level == 0:
             after(rdm, i)
@@ -95,10 +100,13 @@ def BaryMeshHierarchy(mesh, refinement_levels, distribution_parameters=None, cal
                            "exterior_facets", "boundary_faces",
                            FACE_SETS_LABEL)
 
-    uniform_lgmaps_without_overlap = [
-        impl.create_lgmap(dm) for dm in dms
+    # Capture maps while the DMPlexes are still unoverlapped.  Mesh
+    # construction below adds overlap in place, so these are needed to carry
+    # the point maps from refinement over to the final meshes.
+    uniform_lgmaps_without_overlap = [impl.create_lgmap(dm) for dm in dms]
+    uniform_fine_to_coarse_points = [
+        impl.transform_source_points(dm) for dm in dms[1:]
     ]
-    bary_lgmaps_without_overlap = [impl.create_lgmap(dm) for dm in barydms]
 
     barymeshes = [firedrake.Mesh(dm, dim=mesh.geometric_dimension,
                                  distribution_parameters=distribution_parameters,
@@ -112,33 +120,42 @@ def BaryMeshHierarchy(mesh, refinement_levels, distribution_parameters=None, cal
                                       reorder=reorder)
                        for dm in dms[1:]]
 
-    lgmaps = []
-    for i, (m, no) in enumerate(zip(meshes, uniform_lgmaps_without_overlap)):
-        o = impl.create_lgmap(m.topology_dm)
-        m.topology_dm.setRefineLevel(i)
-        lgmaps.append((no, o))
+    with pyop2.mpi.temp_internal_comm(meshes[0].comm) as icomm:
+        num_halo_cells = icomm.allreduce(
+            sum(m.cell_set.total_size - m.cell_set.size for m in meshes)
+        )
+    if num_halo_cells == 0:
+        uniform_lgmaps_without_overlap = [None] * len(dms)
+
+    uniform_fine_to_coarse_points = [
+        impl.overlapped_fine_to_coarse_points(
+            meshes[i], meshes[i + 1], points,
+            uniform_lgmaps_without_overlap[i],
+            uniform_lgmaps_without_overlap[i + 1],
+        )
+        for i, points in enumerate(uniform_fine_to_coarse_points)
+    ]
+
+    for i, mesh_level in enumerate(meshes):
+        mesh_level.topology_dm.setRefineLevel(i)
 
     coarse_to_fine_cells = []
     fine_to_coarse_cells = [None]
-    for (coarse, fine), (clgmaps, flgmaps) in zip(zip(meshes[:-1], meshes[1:]),
-                                                  zip(lgmaps[:-1], lgmaps[1:])):
-        c2f, f2c = impl.coarse_to_fine_cells(coarse, fine, clgmaps, flgmaps)
+    for (coarse, fine), points in zip(zip(meshes[:-1], meshes[1:]),
+                                      uniform_fine_to_coarse_points):
+        c2f, f2c = impl.coarse_to_fine_cells(coarse, fine, points)
         coarse_to_fine_cells.append(c2f)
         fine_to_coarse_cells.append(f2c)
 
-    lgmaps = []
-    for i, (m, no) in enumerate(zip(barymeshes, bary_lgmaps_without_overlap)):
-        o = impl.create_lgmap(m.topology_dm)
-        m.topology_dm.setRefineLevel(i)
-        lgmaps.append((no, o))
+    for i, mesh_level in enumerate(barymeshes):
+        mesh_level.topology_dm.setRefineLevel(i)
 
     d = mesh.topological_dimension
     bary_coarse_to_fine_cells = []
     bary_fine_to_coarse_cells = [None]
-    for (coarseu, fineu), (coarse, fine), (clgmaps, flgmaps), uniform_coarse_to_fine \
+    for (coarseu, fineu), (coarse, fine), uniform_coarse_to_fine \
         in zip(zip(meshes[:-1], meshes[1:]),
                zip(barymeshes[:-1], barymeshes[1:]),
-               zip(lgmaps[:-1], lgmaps[1:]),
                coarse_to_fine_cells):
 
         cdm = coarseu._topology_dm

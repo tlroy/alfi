@@ -125,7 +125,10 @@ class AutoSchoeberlTransfer(object):
         hierarchy, level = get_level(V.mesh())
         dm = V.mesh()._topology_dm
 
-        section = V.dm.getDefaultSection()
+        # Firedrake now installs the section of a FunctionSpace on its
+        # DMShell as the local section; PETSc no longer exposes a default
+        # section there.
+        section = V.dm.getLocalSection()
         indices = []
         fStart, fEnd = dm.getHeightStratum(1)
         # Spin over faces, if the face is marked with a magic label
