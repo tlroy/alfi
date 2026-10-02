@@ -59,7 +59,8 @@ class NavierStokesSolver(object):
                  patch_composition="additive", restriction=False, smoothing=None,
                  rebalance_vertices=False,
                  hierarchy_callback=None,
-                 high_accuracy=False
+                 high_accuracy=False,
+                 coarse_telescope_ranks=24
                  ):
 
         assert solver_type in {"almg", "allu", "lu", "simple", "lsc"}, "Invalid solver type %s" % solver_type
@@ -68,6 +69,8 @@ class NavierStokesSolver(object):
         assert stabilisation_type in {None, "gls", "supg", "burman"}, "Invalid stabilisation type %s" % stabilisation_type
         assert hierarchy in {"uniform", "bary", "uniformbary"}, "Invalid hierarchy type %s" % hierarchy
         assert patch in {"macro", "star"}, "Invalid patch type %s" % patch
+        if not isinstance(coarse_telescope_ranks, int) or coarse_telescope_ranks < 1:
+            raise ValueError("coarse_telescope_ranks must be a positive integer")
         if hierarchy != "bary" and patch == "macro":
             raise ValueError("macro patch only makes sense with a BaryHierarchy")
         self.hierarchy = hierarchy
@@ -82,6 +85,7 @@ class NavierStokesSolver(object):
         self.restriction = restriction
         self.smoothing = smoothing
         self.high_accuracy = high_accuracy
+        self.coarse_telescope_ranks = coarse_telescope_ranks
 
         def rebalance(dm, i):
             if rebalance_vertices:
@@ -354,8 +358,8 @@ class NavierStokesSolver(object):
         }
 
         size = self.mesh.mpi_comm().size
-        if size > 24:
-            telescope_factor = round(size/24.0)
+        if size > self.coarse_telescope_ranks:
+            telescope_factor = round(size/self.coarse_telescope_ranks)
         else:
             telescope_factor = 1
         fieldsplit_0_mg = {
